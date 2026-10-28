@@ -52,7 +52,7 @@ REJECTION_TABLE = "FLYCREATIVE_REJECT"  # output table for rejected rows
 CLEAR_REJECTION_TABLE = False  # True: empty the rejection table at start of each run
 
 MAX_FLIGHTS = 4
-MAX_FLTNO_LEN = 5
+MAX_FLTNO_LEN = 7
 BATCH_SIZE = 200_000
 
 DATE_YEAR_MIN = 2015
