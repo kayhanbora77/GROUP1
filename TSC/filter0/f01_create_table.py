@@ -96,7 +96,7 @@ def read_excel_file(path: str) -> pl.DataFrame:
 
 
 # ----------------------------------------------------------------------
-# STEP 2 - TRIM TEXT, BLANK -> NULL, ADD ID / SourceFile
+# STEP 2 - TRIM TEXT, BLANK -> NULL, ADD Id / SourceFile
 # ----------------------------------------------------------------------
 
 def clean_text_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -110,11 +110,11 @@ def clean_text_columns(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def add_uuid_and_source(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
-    if "ID" in df.columns:
-        raise ValueError("Source file already contains an 'ID' column.")
-    ids = pl.Series("ID", [str(uuid.uuid4()) for _ in range(df.height)], dtype=pl.String)
+    if "Id" in df.columns:
+        raise ValueError("Source file already contains an 'Id' column.")
+    ids = pl.Series("Id", [str(uuid.uuid4()) for _ in range(df.height)], dtype=pl.String)
     df = df.with_columns(ids, pl.lit(source_name).alias("SOURCEFILE"))
-    return df.select(["ID", "SOURCEFILE", *[c for c in df.columns if c not in ("ID", "SOURCEFILE")]])
+    return df.select(["Id", "SOURCEFILE", *[c for c in df.columns if c not in ("Id", "SOURCEFILE")]])
 
 
 # ----------------------------------------------------------------------
