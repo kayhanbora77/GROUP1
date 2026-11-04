@@ -1,0 +1,36 @@
+UPDATE yatra_raw
+SET AirlineCode = air.iata_code
+FROM airlinestemp air
+WHERE TRIM(yatra_raw.AirlineName) = TRIM(air.Airline_Name);
+
+UPDATE yatra_raw
+SET AirlineCode = air.iata_code
+FROM airlinestemp2 air
+WHERE TRIM(yatra_raw.AirlineName) = TRIM(air.Airline_Name);
+
+UPDATE yatra_raw
+SET AirlineCode = air.iata_code
+FROM airlinestemp3 air
+WHERE TRIM(yatra_raw.AirlineName) = TRIM(air.Airline_Name);
+
+
+ALTER TABLE yatra_raw
+ADD COLUMN FLIGHTNUMBER_OLD VARCHAR;
+
+update yatra_raw
+set FLIGHTNUMBER_OLD=FLIGHTNUMBER
+
+UPDATE yatra_raw
+SET FLIGHTNUMBER = AIRLINECODE || FLIGHTNUMBER;
+
+ALTER TABLE yatra_raw
+RENAME COLUMN DEPARTUREAIRPORT TO AIRPORT1;
+
+ALTER TABLE yatra_raw
+RENAME COLUMN ARRIVALAIRPORT TO AIRPORT2;
+
+ALTER TABLE yatra_raw
+RENAME COLUMN FLIGHTNUMBER TO FLIGHTNUMBER1;
+
+ALTER TABLE yatra_raw
+RENAME COLUMN DEPARTUREDATE TO DEPARTUREDATE1;
