@@ -253,8 +253,9 @@ def add_uuid_and_source(
     return df.select(ordered)
 
 
+
 # ----------------------------------------------------------------------
-# STEP 5 - FLIGHT NUMBERS AND AIRLINE CODES
+# STEP 5 - NORMALIZE FLIGHT NUMBERS + AIRLINE CODES
 # ----------------------------------------------------------------------
 
 def process_flight_columns(df: pl.DataFrame) -> pl.DataFrame:
@@ -266,41 +267,70 @@ def process_flight_columns(df: pl.DataFrame) -> pl.DataFrame:
         if col not in df.columns:
             continue
 
-        # Remove ALL whitespace, including internal spaces.
+        suffix = col.replace("FLIGHTNO", "")
+
+        # Remove all whitespace.
         no_space = (
             pl.col(col)
             .str.replace_all(r"\s+", "")
+            .str.to_uppercase()
         )
 
+        # Convert blank / NULL words to NULL.
         cleaned = (
             pl.when(
-                no_space.str.to_lowercase().is_in(NULL_WORDS)
+                no_space.is_null()
+                | (no_space == "")
+                | no_space.str.to_lowercase().is_in(NULL_WORDS)
             )
             .then(None)
             .otherwise(no_space)
         )
 
-        suffix = col.replace("FLIGHTNO", "")
+        # Split airline code and numeric flight number.
+        airline = cleaned.str.extract(
+            r"^([A-Z0-9]{2})",
+            1
+        )
 
-        # Examples:
-        # QR0557 -> QR
-        # EK0008 -> EK
-        # 6E1342 -> 6E
-        # TK4650 -> TK
+        flight_digits = cleaned.str.extract(
+            r"^[A-Z0-9]{2}([0-9]+)$",
+            1
+        )
+
+        # Remove leading zeros.
+        normalized_digits = (
+            flight_digits.str.replace(r"^0+", "")
+        )
+
+        # Preserve a zero if the entire numeric portion is zero.
+        normalized_digits = (
+            pl.when(normalized_digits == "")
+            .then(pl.lit("0"))
+            .otherwise(normalized_digits)
+        )
+
+        # Rebuild normalized flight number.
+        normalized = (
+            pl.when(
+                airline.is_not_null()
+                & flight_digits.is_not_null()
+            )
+            .then(
+                airline + normalized_digits
+            )
+            .otherwise(cleaned)
+        )
 
         expressions.extend([
-            cleaned.str.extract(
-                IATA_RE, 1
-            ).alias(f"AIRLINECODE{suffix}"),
-
-            cleaned.alias(col),
+            normalized.alias(col),
+            airline.alias(f"AIRLINECODE{suffix}"),
         ])
 
     if expressions:
         df = df.with_columns(expressions)
 
     return df
-
 
 # ----------------------------------------------------------------------
 # STEP 6 - PARSE DATES
