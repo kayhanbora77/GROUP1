@@ -1,14 +1,17 @@
 """
-process_flight_excel.py  (Multi-file Excel version - No IDATE)
+process_flight_excel.py (Multi-file Excel Loader for DuckDB)
 
-1. Reads EVERY *.xlsx / *.xls file in EXCEL_FOLDER using Polars.
-2. Forces all columns to String/VARCHAR to prevent scientific notation, 
-   truncation of large ticket numbers, or loss of leading zeros.
-3. Trims all text, turns blank cells into NULL.
-4. Adds a UUID per row ("Id") and the source file name ("SourceFile").
-5. Extracts AirlineCode from FLIGHTNO and removes whitespace from flight numbers.
-6. Parses dates (FlightDate1..6).
-7. Loads all files into one DuckDB table.
+1. Reads every Excel file matching EXCEL_GLOB from EXCEL_FOLDER using Polars.
+2. Normalizes column names (trim + uppercase).
+3. Converts all columns to String to preserve ticket numbers, codes,
+   leading zeros, and prevent scientific notation.
+4. Trims text values and converts blank/null-like values to NULL.
+5. Adds a UUID ("Id") and source filename ("SOURCEFILE") to every row.
+6. Cleans flight numbers and extracts AIRLINECODE from FLIGHTNO.
+7. Parses DAIS and FLIGHTDATE columns into Datetime values.
+8. Creates FLIGHTTIME by combining FLIGHTDATE and TIME when available.
+9. Combines data from all Excel files into a single Polars DataFrame.
+10. Loads the consolidated dataset into a DuckDB table.
 """
 
 import glob
@@ -33,7 +36,7 @@ TRUNCATE_BEFORE_LOAD = True
 
 FLIGHT_NUMBER_COLS = ["FLIGHTNO"]
 
-# Updated: Removed IDATE since it does not exist in your Excel files
+# Date columns that should be parsed into Datetime values.
 DATE_COLS = ["DAIS", "FLIGHTDATE"]
 
 FLIGHTDATE_FORMATS = [
@@ -87,7 +90,8 @@ def read_excel_file(path: str) -> pl.DataFrame:
     # Normalise header names first: trim + upper-case
     df = df.rename({c: c.strip().upper() for c in df.columns})
 
-    # Cast every single column to String so TicketNumber, codes, etc., never lose digits or leading zeros
+    # Convert all columns to String to preserve formatting and prevent
+    # scientific notation, truncation, or loss of leading zeros.
     df = df.with_columns([pl.col(c).cast(pl.String) for c in df.columns])
 
     print(f"  {os.path.basename(path)}: {df.height:,} rows, {df.width} cols")
@@ -118,7 +122,7 @@ def add_uuid_and_source(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
 
 
 # ----------------------------------------------------------------------
-# STEP 3 - AIRLINE CODES + CLEAN FLIGHT NUMBERS
+# STEP 3 - NORMALIZE FLIGHT NUMBERS AND EXTRACT AIRLINE CODES
 # ----------------------------------------------------------------------
 
 IATA_RE = r"^([A-Za-z][A-Za-z0-9]|[0-9][A-Za-z])"
@@ -185,69 +189,6 @@ def add_flight_time(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
         print(bad.unique().head(20))
     return df
 
-
-def add_connections(df: pl.DataFrame) -> pl.DataFrame:
-    keys = ["TDNR", "PNRR", "PAXNAME"]
-    # safety net: the connection logic needs these columns
-    df = df.filter(pl.all_horizontal(pl.col(c).is_not_null() for c in REQUIRED_COLS))
-
-    df = (
-        df.with_row_index("__row")
-          .sort(keys + ["FLIGHTTIME", "__row"], nulls_last=True, maintain_order=True)
-    )
-
-    fdate = pl.col("FLIGHTDATE").dt.date()
-    prev_date = fdate.shift(1).over(keys)
-    prev_to = pl.col("AIRPORT2").shift(1).over(keys)
-
-    # a new connection starts when: first row of the passenger/PNR, gap > 2 days,
-    # or the legs do not chain (previous AIRPORT2 != this AIRPORT1)
-    new_conn = (
-        prev_date.is_null()
-        | ((fdate - prev_date).dt.total_days() > 2)
-        | (prev_to != pl.col("AIRPORT1"))
-    ).fill_null(True)
-
-    df = df.with_columns(new_conn.cum_sum().alias("__conn"))
-
-    n_conn = df["__conn"].max() or 0
-    uuids = pl.Series("ConnectionID", [str(uuid.uuid4()) for _ in range(n_conn)], dtype=pl.String)
-    df = df.with_columns(uuids.gather(df["__conn"] - 1).alias("ConnectionID"))
-
-
-    df = df.with_columns(
-        (pl.int_range(pl.len()).over("__conn") + 1).alias("LEGNO"),
-        # AIRPORT2 of the last leg in the connection, on every row of that connection.
-        # drop_nulls() falls back to the last non-null AIRPORT2 if the final leg's is missing.
-        pl.col("AIRPORT2").drop_nulls().last().over("__conn").alias("LastLegAirport"),
-    )
-
-    null_cnt = df["LastLegAirport"].null_count()
-    if null_cnt:
-        print(f"\nERROR: {null_cnt:,} row(s) have no AIRPORT2 anywhere in their connection:")
-        print(
-            df.filter(pl.col("LastLegAirport").is_null())
-              .select(["SOURCEFILE", "TDNR", "PNRR", "PAXNAME", "AIRPORT1", "AIRPORT2", "FLIGHTDATE"])
-              .head(20)
-        )
-        raise ValueError("LastLegAirport must be NOT NULL")
-    
-    return df.drop(["__row", "__conn"])    
-
-REQUIRED_COLS = ["TDNR", "PNRR", "PAXNAME", "AIRPORT1", "AIRPORT2", "FLIGHTDATE"]
-REJECT_TABLE = "AKBAR_RAW_REJECTED"
-
-def split_rejects(df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Rows missing any required column go to the reject table with a RejectReason."""
-    missing_any = pl.any_horizontal([pl.col(c).is_null() for c in REQUIRED_COLS])
-    reason = pl.concat_str(
-        [pl.when(pl.col(c).is_null()).then(pl.lit(f"{c};")).otherwise(pl.lit(""))
-         for c in REQUIRED_COLS]
-    ).alias("RejectReason")
-
-    rejected = df.filter(missing_any).with_columns(reason)
-    good = df.filter(~missing_any)
-    return good, rejected    
 # ----------------------------------------------------------------------
 # STEP 5 - INSERT INTO DUCKDB
 # ----------------------------------------------------------------------
@@ -326,18 +267,10 @@ def main() -> None:
         raise RuntimeError("All files were empty - nothing to load.")
 
     combined = pl.concat(frames, how="diagonal")
-
-    combined, rejected = split_rejects(combined)          # must be assigned, and before add_connections
-    print(f"Rejected rows: {rejected.height:,}")
-    if rejected.height:
-        insert_into_duckdb(rejected, DB_PATH, REJECT_TABLE)
-
-    combined = add_connections(combined)
+    
     print(f"\nProcessed rows (all files combined): {combined.height:,}")
-
     insert_into_duckdb(combined, DB_PATH, TABLE_NAME)
     
-
 
 if __name__ == "__main__":
     main()
