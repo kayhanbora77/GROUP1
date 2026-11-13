@@ -171,23 +171,176 @@ def parse_dates(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
 
 
 def add_flight_time(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
-    """Combine parsed FLIGHTDATE (date) + TIME (HH:MM[:SS] text) into FLIGHTTIME."""
-    if "FLIGHTDATE" not in df.columns or "TIME" not in df.columns:
+    """
+    Build FLIGHTTIME using FLIGHTDATE and TIME.
+
+    Supported TIME formats:
+        20:05
+        9:10
+        9:10A
+        9:10P
+        9:10AM
+        12:55PM
+        20:05:00
+
+    If TIME cannot be parsed, use HOUR + MIN.
+
+    MIN can contain values such as:
+        10
+        10A
+        55P
+    """
+
+    if "FLIGHTDATE" not in df.columns:
         return df
 
-    t = pl.coalesce([
-        pl.col("TIME").str.strptime(pl.Time, format="%H:%M", strict=False, exact=True),
-        pl.col("TIME").str.strptime(pl.Time, format="%H:%M:%S", strict=False, exact=True),
-    ])
-    df = df.with_columns(
-        pl.col("FLIGHTDATE").dt.date().dt.combine(t).alias("FLIGHTTIME")
+    if "TIME" not in df.columns:
+        print(f"WARNING [{source_name}]: TIME column missing.")
+        return df
+
+    # Normalize TIME text
+    time_text = (
+        pl.col("TIME")
+        .cast(pl.String)
+        .str.strip_chars()
+        .str.to_uppercase()
     )
 
-    bad = df.filter(pl.col("TIME").is_not_null() & pl.col("FLIGHTTIME").is_null()).select("TIME")
+    # Extract hour, minute and optional AM/PM suffix.
+    # Examples: 9:10A, 12:55P, 09:10AM, 20:05
+    time_hour = time_text.str.extract(
+        r"^(\d{1,2})\s*:\s*(\d{1,2})\s*([AP])?\.?M?\.?$",
+        1
+    ).cast(pl.Int64, strict=False)
+
+    time_minute = time_text.str.extract(
+        r"^(\d{1,2})\s*:\s*(\d{1,2})\s*([AP])?\.?M?\.?$",
+        2
+    ).cast(pl.Int64, strict=False)
+
+    time_suffix = time_text.str.extract(
+        r"^(\d{1,2})\s*:\s*(\d{1,2})\s*([AP])?\.?M?\.?$",
+        3
+    )
+
+    # Fallback: extract HOUR and MIN columns.
+    if "HOUR" in df.columns:
+        fallback_hour = (
+            pl.col("HOUR")
+            .cast(pl.String)
+            .str.strip_chars()
+            .str.extract(r"^(\d{1,2})", 1)
+            .cast(pl.Int64, strict=False)
+        )
+    else:
+        fallback_hour = pl.lit(None, dtype=pl.Int64)
+
+    if "MIN" in df.columns:
+        min_text = (
+            pl.col("MIN")
+            .cast(pl.String)
+            .str.strip_chars()
+            .str.to_uppercase()
+        )
+
+        fallback_minute = (
+            min_text
+            .str.extract(r"^(\d{1,2})", 1)
+            .cast(pl.Int64, strict=False)
+        )
+
+        fallback_suffix = min_text.str.extract(
+            r"^\d{1,2}\s*([AP])\.?M?\.?$",
+            1
+        )
+    else:
+        fallback_minute = pl.lit(None, dtype=pl.Int64)
+        fallback_suffix = pl.lit(None, dtype=pl.String)
+
+    # Prefer TIME; otherwise use HOUR + MIN.
+    hour = pl.coalesce([time_hour, fallback_hour])
+    minute = pl.coalesce([time_minute, fallback_minute])
+
+    suffix = pl.coalesce([time_suffix, fallback_suffix])
+
+    # Convert 12-hour time into 24-hour time.
+    hour_24 = (
+        pl.when(suffix == "A")
+        .then(hour % 12)
+        .when(suffix == "P")
+        .then((hour % 12) + 12)
+        .otherwise(hour)
+    )
+
+    # Validate time values.
+    valid_time = (
+        hour_24.is_not_null()
+        & minute.is_not_null()
+        & (hour_24 >= 0)
+        & (hour_24 <= 23)
+        & (minute >= 0)
+        & (minute <= 59)
+    )
+
+    # Construct a complete datetime string.
+    date_text = pl.col("FLIGHTDATE").dt.strftime("%Y-%m-%d")
+
+    datetime_text = pl.concat_str(
+        [
+            date_text,
+            hour_24.cast(pl.String).str.pad_start(2, "0"),
+            minute.cast(pl.String).str.pad_start(2, "0"),
+        ],
+        separator=" "
+    )
+
+    result = df.with_columns(
+        pl.when(valid_time)
+        .then(
+            datetime_text.str.strptime(
+                pl.Datetime,
+                format="%Y-%m-%d %H %M",
+                strict=False
+            )
+        )
+        .otherwise(None)
+        .alias("FLIGHTTIME")
+    )
+
+    # Report invalid records.
+    bad = result.filter(
+        pl.col("FLIGHTDATE").is_not_null()
+        & pl.col("FLIGHTTIME").is_null()
+        & (
+            pl.col("TIME").is_not_null()
+            | (
+                pl.col("HOUR").is_not_null()
+                if "HOUR" in df.columns
+                else pl.lit(False)
+            )
+        )
+    )
+
     if bad.height:
-        print(f"\nWARNING [{source_name}]: {bad.height:,} invalid TIME value(s):")
-        print(bad.unique().head(20))
-    return df
+        print(
+            f"\nWARNING [{source_name}]: "
+            f"{bad.height:,} FLIGHTTIME values could not be parsed."
+        )
+
+        diagnostic_cols = [
+            c for c in [
+                "FLIGHTNO",
+                "FLIGHTDATE",
+                "HOUR",
+                "MIN",
+                "TIME"
+            ]
+            if c in bad.columns
+        ]
+
+        print(bad.select(diagnostic_cols).unique().head(20))
+
+    return result
 
 # ----------------------------------------------------------------------
 # STEP 5 - INSERT INTO DUCKDB
