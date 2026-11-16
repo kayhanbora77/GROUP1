@@ -1,0 +1,18 @@
+SELECT
+    a.Id,
+    a.FLIGHTNO AS OldFlightNo,
+    REGEXP_REPLACE(a.FLIGHTNO, 'A$', '') AS NewFlightNo,
+    r.RejectionReason
+FROM AKBAR_RAW a
+INNER JOIN AKBAR_REJECTED r
+    ON a.Id = r.Id
+WHERE r.RejectionReason LIKE '%Slot1: FlightNumber BAD_FORMAT (fn=''BS%A'')%';
+
+
+UPDATE AKBAR_RAW
+SET FLIGHTNO = REGEXP_REPLACE(FLIGHTNO, 'A$', '')
+WHERE Id IN (
+    SELECT Id
+    FROM AKBAR_REJECTED
+    WHERE RejectionReason LIKE '%Slot1: FlightNumber BAD_FORMAT (fn=''BS%A'')%'
+);
