@@ -26,3 +26,6 @@ WHERE RejectionReason LIKE '%Slot1: FlightNumber BAD_FORMAT (fn=''BS%A'')%';
 --4. Delete From Akbar_Rejected
 DELETE FROM AKBAR_REJECTED
 WHERE RejectionReason LIKE '%Slot1: FlightNumber BAD_FORMAT (fn=''BS%A'')%'
+
+-------------------------------------------------
+run f11_rejection.py again but do not run f12_update_flightno.py
