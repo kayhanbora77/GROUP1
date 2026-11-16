@@ -42,7 +42,7 @@ Two ways of ordering legs inside a key:
 import itertools
 import uuid
 from collections import namedtuple
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 import duckdb
 import polars as pl
@@ -51,7 +51,7 @@ DB_PATH = r"C:\DuckDB\my_db.duckdb"
 SOURCE_TABLE_NAME = "AKBAR_CLEANED"
 TARGET_TABLE = "TA_STANDARD_AKBAR"
 
-MAX_GAP_DAYS = 2
+MAX_GAP_DAYS = 1
 MAX_CHAIN_GROUP = 300   # larger groups (junk keys) use a cheap sequential chain
 NEW_COLS = ["ConnectionID", "LEGNO", "LASTLEGAIRPORT"]
 
@@ -117,19 +117,22 @@ def _stpo_continues() -> pl.Expr:
 # --------------------------------------------------------------------------- #
 # Path A: groups where every leg has a FLIGHTTIME -> vectorised, time ordered
 # --------------------------------------------------------------------------- #
-def _label_by_time(df: pl.DataFrame) -> pl.DataFrame:
-    df = df.sort(["__key", "__ft", "__row"], nulls_last=True, maintain_order=True)
+def _label_by_time(df: pl.DataFrame) -> pl.DataFrame:   
+    df = df.sort(["__key", "__fd", "__ft", "__row"], nulls_last=True, maintain_order=True)
 
     fdate = pl.col("__fd").dt.date()
     prev_date = fdate.shift(1).over("__key")
+    prev_from = _clean_code("AIRPORT1").shift(1).over("__key")   # NEW
     prev_to = _clean_code("AIRPORT2").shift(1).over("__key")
     curr_from = _clean_code("AIRPORT1")
+    curr_to = _clean_code("AIRPORT2")                            # NEW
     prev_cont = _stpo_continues().shift(1).over("__key").fill_null(False)
 
     new_conn = (
         prev_date.is_null()                                     # First row in group
         | ((fdate - prev_date).dt.total_days() > MAX_GAP_DAYS)  # Date gap > 2 days
         | (prev_to != curr_from)                                # Airports don't chain
+        | (curr_to == prev_from)                                # NEW: return/reverse leg (A->B then B->A)
         | ~prev_cont                                            # Previous leg was the last leg
     ).fill_null(True)
 
@@ -148,10 +151,14 @@ def _can_follow(p: Leg, c: Leg) -> bool:
         return False
     if p.a2 is None or c.a1 is None or p.a2 != c.a1:  # route must chain
         return False
+    if p.a1 is not None and c.a2 == p.a1:             # NEW: reverse leg starts a new journey
+        return False
     if p.fd is None or c.fd is None:                 # unknown date -> don't join (as before)
         return False
     gap = (c.fd - p.fd).days
     if gap < 0 or gap > MAX_GAP_DAYS:
+        return False
+    if gap == 0 and p.ft is not None and c.ft is not None and p.ft.time() > c.ft.time():
         return False
     if p.ft is not None and c.ft is not None and p.ft > c.ft:
         return False
@@ -162,15 +169,18 @@ def _build_chains(legs: list) -> list:
     """Return a list of chains; each chain is a list of indexes into `legs`, in leg order."""
     n = len(legs)
     order = sorted(
-        range(n),
-        key=lambda i: (legs[i].fd or date.max, legs[i].ft or datetime.max, legs[i].row),
+        range(nw),
+        key=lambda i: (legs[i].fd or date.max,
+                       legs[i].ft.time() if legs[i].ft else time.max,
+                       legs[i].row),
     )
 
     # Very large groups come from junk keys: avoid O(n^2) work, chain sequentially.
     if n > MAX_CHAIN_GROUP:
         chains: list = []
         for i in order:
-            if chains and _can_follow(legs[chains[-1][-1]], legs[i]):
+            if chains and _can_follow(legs[chains[-1][-1]], legs[i]) \
+                    and legs[i].a2 not in {legs[k].a1 for k in chains[-1]}:
                 chains[-1].append(i)
             else:
                 chains.append([i])
@@ -190,7 +200,10 @@ def _build_chains(legs: list) -> list:
         unassigned.remove(head)
         while True:
             tail = legs[chain[-1]]
-            nxt = next((j for j in unassigned if _can_follow(tail, legs[j])), None)
+            visited = {legs[k].a1 for k in chain}
+            nxt = next(
+                (j for j in unassigned
+                 if _can_follow(tail, legs[j]) and legs[j].a2 not in visited), None,)            
             if nxt is None:
                 break
             chain.append(nxt)
