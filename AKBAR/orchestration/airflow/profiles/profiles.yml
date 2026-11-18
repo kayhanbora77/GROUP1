@@ -1,0 +1,10 @@
+# Profile used inside the Airflow container (the host warehouse is mounted at
+# /opt/duckdb). The host keeps using dbt/profiles.yml.
+akbar:
+  target: docker
+  outputs:
+    docker:
+      type: duckdb
+      path: "/opt/duckdb/my_db.duckdb"
+      schema: akbar_dbt
+      threads: 4

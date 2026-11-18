@@ -12,6 +12,7 @@ process_flight_excel.py (Multi-file Excel Loader for DuckDB)
 8. Creates FLIGHTTIME by combining FLIGHTDATE and TIME when available.
 9. Combines data from all Excel files into a single Polars DataFrame.
 10. Loads the consolidated dataset into a DuckDB table.
+11. Only updates values matching the pattern '^BS\\d+A$'
 """
 
 import glob
@@ -69,11 +70,9 @@ def validate_table_name(name: str) -> None:
     if not parts or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", p) for p in parts):
         raise ValueError(f"Invalid DuckDB table name: {name!r}")
 
-
 # ----------------------------------------------------------------------
 # STEP 1 - FIND + READ EXCEL FILES
 # ----------------------------------------------------------------------
-
 def list_excel_files(folder: str, pattern: str) -> list[str]:
     if not os.path.isdir(folder):
         raise FileNotFoundError(f"Folder not found: {folder}")
@@ -96,7 +95,6 @@ def read_excel_file(path: str) -> pl.DataFrame:
 
     print(f"  {os.path.basename(path)}: {df.height:,} rows, {df.width} cols")
     return df
-
 
 # ----------------------------------------------------------------------
 # STEP 2 - TRIM TEXT, BLANK -> NULL, ADD Id / SourceFile
@@ -124,9 +122,7 @@ def add_uuid_and_source(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
 # ----------------------------------------------------------------------
 # STEP 3 - NORMALIZE FLIGHT NUMBERS AND EXTRACT AIRLINE CODES
 # ----------------------------------------------------------------------
-
 IATA_RE = r"^([A-Za-z][A-Za-z0-9]|[0-9][A-Za-z])"
-
 
 def process_flight_columns(df: pl.DataFrame) -> pl.DataFrame:
     expressions = []
@@ -145,11 +141,9 @@ def process_flight_columns(df: pl.DataFrame) -> pl.DataFrame:
         expressions.append(cleaned.alias(col))
     return df.with_columns(expressions)
 
-
 # ----------------------------------------------------------------------
 # STEP 4 - PARSE DATES
 # ----------------------------------------------------------------------
-
 def parse_dates(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
     for col in DATE_COLS:
         if col not in df.columns:
@@ -345,7 +339,6 @@ def add_flight_time(df: pl.DataFrame, source_name: str) -> pl.DataFrame:
 # ----------------------------------------------------------------------
 # STEP 5 - INSERT INTO DUCKDB
 # ----------------------------------------------------------------------
-
 def insert_into_duckdb(df: pl.DataFrame, db_path: str, table_name: str) -> None:
     validate_table_name(table_name)
 
@@ -393,11 +386,32 @@ def insert_into_duckdb(df: pl.DataFrame, db_path: str, table_name: str) -> None:
     finally:
         con.close()
 
+# ----------------------------------------------------------------------
+# STEP 6 FIX FLIGHTNO = Only updates values matching the pattern '^BS\d+A$'KDB
+# ----------------------------------------------------------------------
+def fix_flightno_suffix(db_path: str, table_name: str) -> None:
+    """Former f12: strip the stray trailing 'A' from BS flight numbers (e.g. BS123A -> BS123)."""
+    validate_table_name(table_name)
+    table_sql = ".".join(quote_identifier(p) for p in table_name.split("."))
+    pattern = r"^BS\d+A$"
+
+    con = duckdb.connect(db_path)
+    try:
+        n = con.execute(
+            f"SELECT COUNT(*) FROM {table_sql} WHERE regexp_matches(FLIGHTNO, ?)", [pattern]
+        ).fetchone()[0]
+        if n:
+            con.execute(
+                f"UPDATE {table_sql} SET FLIGHTNO = regexp_replace(FLIGHTNO, 'A$', '') "
+                f"WHERE regexp_matches(FLIGHTNO, ?)", [pattern]
+            )
+        print(f"FLIGHTNO fix: {n:,} row(s) updated (trailing 'A' removed from BS flights)")
+    finally:
+        con.close()                                                                                                                                                                                                                                                            
 
 # ----------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------
-
 def main() -> None:
     files = list_excel_files(EXCEL_FOLDER, EXCEL_GLOB)
     print(f"Found {len(files)} Excel file(s) in {EXCEL_FOLDER}")
@@ -423,7 +437,7 @@ def main() -> None:
     
     print(f"\nProcessed rows (all files combined): {combined.height:,}")
     insert_into_duckdb(combined, DB_PATH, TABLE_NAME)
-    
+    fix_flightno_suffix(DB_PATH, TABLE_NAME)
 
 if __name__ == "__main__":
     main()

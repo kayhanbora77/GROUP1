@@ -1,0 +1,32 @@
+name: akbar
+version: "1.0.0"
+profile: akbar
+
+model-paths: ["models"]
+test-paths: ["tests"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages", "logs"]
+
+models:
+  akbar:
+    staging:
+      +materialized: view
+      # Heavy Excel re-load, off unless explicitly switched on here.
+      optional:
+        +enabled: "{{ var('enable_excel_ingest', false) }}"  #false
+    intermediate:
+      +materialized: table
+    marts:
+      +materialized: table
+
+vars:
+  # Date the "years since departure" age limits are measured against (was hardcoded in f22).
+  reference_date: "2026-12-01"
+  # Optional row cap (hash-free, Id ordered) so models/tests can run in seconds.
+  # Leave null for the full 11.2M row pipeline.
+  row_limit: null
+
+on-run-start:
+  - "SET memory_limit='8GB'"
+  - "SET temp_directory='C:/DuckDB/temp'"
+  - "SET preserve_insertion_order=false"

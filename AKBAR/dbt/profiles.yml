@@ -1,0 +1,12 @@
+# Project-local profile so the pipeline is reproducible without touching ~/.dbt.
+# Run everything with:  dbt build --profiles-dir .
+akbar:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # Same warehouse the legacy scripts use. dbt writes to the akbar_dbt
+      # schema only, so main.AKBAR_RAW / main.TA_STANDARD_AKBAR stay untouched.
+      path: "C:/DuckDB/my_db.duckdb"
+      schema: akbar_dbt
+      threads: 4

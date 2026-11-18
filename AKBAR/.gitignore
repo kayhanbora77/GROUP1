@@ -1,0 +1,14 @@
+# dbt environment and artifacts
+.venv-dbt/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/*.log
+
+# orchestration output
+orchestration/logs/
+orchestration/airflow/logs/
+
+# python
+__pycache__/
+*.py[cod]

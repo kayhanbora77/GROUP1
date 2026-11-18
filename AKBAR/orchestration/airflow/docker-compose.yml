@@ -1,0 +1,32 @@
+# Local Airflow for scheduling the AKBAR dbt pipeline (free, single container).
+#
+#   cd orchestration/airflow
+#   docker compose up -d
+#   open http://localhost:8080  (user: airflow / password: airflow)
+#
+# The container mounts the project and the DuckDB warehouse, so dbt inside the
+# container sees the same files as the host. DuckDB is single-writer: do not run
+# the pipeline on the host and in Airflow at the same moment.
+
+services:
+  airflow:
+    image: apache/airflow:2.10.5-python3.12
+    container_name: akbar-airflow
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      # dbt + the libraries the python models need, installed at startup.
+      _PIP_ADDITIONAL_REQUIREMENTS: "dbt-duckdb polars pyarrow fastexcel"
+      TZ: Europe/Istanbul
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./profiles:/opt/airflow/dbt_profiles:ro
+      # Project root (read/write: dbt writes target/ and logs/).
+      - ../../:/opt/airflow/akbar
+      # The warehouse lives outside the project on this machine.
+      - C:/DuckDB:/opt/duckdb
+    restart: unless-stopped

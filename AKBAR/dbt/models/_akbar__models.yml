@@ -1,0 +1,64 @@
+version: 2
+
+models:
+  - name: stg_akbar_raw
+    description: "Entry layer: raw booking legs exactly as loaded from Excel (optional row_limit for dev runs)."
+    columns:
+      - name: Id
+        description: "Row UUID added at ingestion (f01)."
+        tests: [not_null, unique]
+
+  - name: int_akbar_scored
+    description: "Single pass over all raw rows applying the f11 rejection rules; RejectionReason NULL means clean."
+    columns:
+      - name: RejectionReason
+        description: "First failing rule, or NULL for clean rows."
+
+  - name: int_akbar_cleaned
+    description: "Clean rows (replaces the legacy AKBAR_CLEANED table)."
+    columns:
+      - name: Id
+        tests: [not_null, unique]
+      - name: FLIGHTNO
+        tests: [not_null]
+
+  - name: int_akbar_rejected
+    description: "Rejected rows with their reason (replaces the legacy AKBAR_REJECTED table)."
+    columns:
+      - name: RejectionReason
+        tests: [not_null]
+
+  - name: int_akbar_connections
+    description: "Clean rows with ConnectionID / LegNo / LastLegAirport, mapped onto the standard target schema (f13)."
+    columns:
+      - name: Id
+        tests: [not_null, unique]
+      - name: ConnectionID
+        tests: [not_null]
+      - name: LegNo
+        tests: [not_null]
+
+  - name: int_akbar_eu_eligibility
+    description: "One row per journey: EUEligible plus the rule that decided it (f21)."
+    columns:
+      - name: ConnectionID
+        tests: [not_null, unique]
+      - name: EUEligible
+        tests: [not_null]
+
+  - name: ta_standard_akbar
+    description: "Standard AKBAR mart: journeys with EU eligibility and both time-limit flags (f21 + f22)."
+    columns:
+      - name: Id
+        tests: [not_null, unique]
+      - name: ConnectionID
+        tests: [not_null]
+      - name: EUEligible
+        tests: [not_null]
+      - name: IsTimeLimitL1
+        tests: [not_null]
+      - name: IsTimeLimitL2
+        tests: [not_null]
+
+  - name: akbar_pipeline_health
+    description: "Row counts per pipeline stage for monitoring / scheduler checks."

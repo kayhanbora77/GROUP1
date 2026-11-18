@@ -37,7 +37,7 @@ SPECIAL_L2_MAP = {
     code: limits[1] for code, limits in SPECIAL_NON_EU_TIME_LIMITS.items()
 }
 
-REFERENCE_DATE = pd.Timestamp("2026-09-15")
+REFERENCE_DATE = pd.Timestamp("2026-12-01")
 
 # ────────────────────────────────────────────────
 # UTILITIES

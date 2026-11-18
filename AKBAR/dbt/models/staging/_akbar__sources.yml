@@ -1,0 +1,34 @@
+version: 2
+
+sources:
+  - name: akbar
+    description: "Existing shared warehouse (main schema of C:/DuckDB/my_db.duckdb). Read-only for this project."
+    schema: main
+    tables:
+      - name: AKBAR_RAW
+        description: "One row per booking leg, loaded from the C2R Excel files by filter0/f01_create_table.py."
+        columns:
+          - name: Id
+            tests: [not_null, unique]
+          - name: FLIGHTDATE
+            description: "Departure date of the leg (TIMESTAMP in raw)."
+          - name: TDNR
+            description: "E-ticket number."
+          - name: PNRR
+            description: "Booking reference."
+          - name: PAXNAME
+            description: "Passenger name as printed by the agency."
+          - name: STPO
+            description: "Leg position flag; 'X' means first/middle leg, NULL/''/'0' means last leg."
+      - name: AIRPORTS
+        description: "IATA code -> country lookup used for EU eligibility and time limits."
+        columns:
+          - name: CodeIataAirport
+            tests: [not_null]
+          - name: CodeIso2Country
+            description: "ISO-2 country of the airport. TR and MA are treated as non-EU."
+      - name: TIME_LIMITS
+        description: "Per-country claim window in years (LimitL1 / LimitL2)."
+        columns:
+          - name: Country
+            tests: [not_null]

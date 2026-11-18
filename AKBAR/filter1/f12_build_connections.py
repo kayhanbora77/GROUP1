@@ -1,7 +1,7 @@
 """
-f03_build_connections.py
+f12_build_connections.py
 ========================
-Runs AFTER the rejection step (f02). Reads SOURCE_TABLE_NAME (AKBAR_CLEANED),
+Runs AFTER the rejection step (f11). Reads SOURCE_TABLE_NAME (AKBAR_CLEANED),
 builds connections, maps columns to the standard schema, and writes the result
 to TARGET_TABLE (TA_STANDARD_AKBAR).
 
@@ -22,7 +22,7 @@ Two ways of ordering legs inside a key:
 
   A) Every row of the key has a parseable FLIGHTTIME (fast, vectorised path)
      Ordered by FLIGHTTIME. A new connection starts when:
-        - The FLIGHTDATE gap to the previous leg is > 2 days, OR
+        - The FLIGHTDATE gap to the previous leg is > 1 day, OR
         - The legs do not chain (previous AIRPORT2 != this AIRPORT1), OR
         - The previous leg was the LAST leg (STPO is NULL, empty, or '0').
           (STPO = 'X' indicates a first/middle leg).
@@ -33,7 +33,7 @@ Two ways of ordering legs inside a key:
      A leg may follow another leg only if:
         - the previous leg is not a last leg (STPO not NULL/''/'0'),
         - AIRPORT2 of the previous leg == AIRPORT1 of this leg,
-        - FLIGHTDATE gap is between 0 and 2 days,
+        - FLIGHTDATE gap is between 0 and 1 day,
         - if both legs have FLIGHTTIME, the previous one is not later.
      The chain starts at the leg that no other leg can precede, so the order
      comes from the route itself rather than from the row order.
@@ -52,7 +52,7 @@ SOURCE_TABLE_NAME = "AKBAR_CLEANED"
 TARGET_TABLE = "TA_STANDARD_AKBAR"
 
 MAX_GAP_DAYS = 1
-MAX_CHAIN_GROUP = 300   # larger groups (junk keys) use a cheap sequential chain
+MAX_CHAIN_GROUP = 100   # larger groups (junk keys) use a cheap sequential chain
 NEW_COLS = ["ConnectionID", "LEGNO", "LASTLEGAIRPORT"]
 
 # Standard target schema for TA_STANDARD_AKBAR
@@ -130,7 +130,7 @@ def _label_by_time(df: pl.DataFrame) -> pl.DataFrame:
 
     new_conn = (
         prev_date.is_null()                                     # First row in group
-        | ((fdate - prev_date).dt.total_days() > MAX_GAP_DAYS)  # Date gap > 2 days
+        | ((fdate - prev_date).dt.total_days() > MAX_GAP_DAYS)  # Date gap > 1 days
         | (prev_to != curr_from)                                # Airports don't chain
         | (curr_to == prev_from)                                # NEW: return/reverse leg (A->B then B->A)
         | ~prev_cont                                            # Previous leg was the last leg
@@ -169,7 +169,7 @@ def _build_chains(legs: list) -> list:
     """Return a list of chains; each chain is a list of indexes into `legs`, in leg order."""
     n = len(legs)
     order = sorted(
-        range(nw),
+        range(n),
         key=lambda i: (legs[i].fd or date.max,
                        legs[i].ft.time() if legs[i].ft else time.max,
                        legs[i].row),
