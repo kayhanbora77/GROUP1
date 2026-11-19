@@ -86,7 +86,7 @@ _DT_FORMATS = [
     "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
 ]
 
-Leg = namedtuple("Leg", "row fd ft a1 a2 cont")
+Leg = namedtuple("Leg", "row fd a1 a2")
 
 
 def quote_identifier(name: str) -> str:
@@ -108,34 +108,27 @@ def _clean_code(col: str) -> pl.Expr:
     return pl.col(col).cast(pl.String).str.strip_chars().str.to_uppercase()
 
 
-def _stpo_continues() -> pl.Expr:
-    """True when the leg is NOT a last leg (STPO is not NULL / '' / '0')."""
-    stpo = pl.col("STPO").cast(pl.String).fill_null("").str.strip_chars()
-    return ~stpo.is_in(["", "0"])
-
-
 # --------------------------------------------------------------------------- #
 # Path A: groups where every leg has a FLIGHTTIME -> vectorised, time ordered
 # --------------------------------------------------------------------------- #
 def _label_by_time(df: pl.DataFrame) -> pl.DataFrame:   
-    df = df.sort(["__key", "__fd", "__ft", "__row"], nulls_last=True, maintain_order=True)
-
+    df = df.sort(["__key", "__fd", "__row"], maintain_order=True)
+    
     fdate = pl.col("__fd").dt.date()
     prev_date = fdate.shift(1).over("__key")
     prev_from = _clean_code("AIRPORT1").shift(1).over("__key")   # NEW
     prev_to = _clean_code("AIRPORT2").shift(1).over("__key")
     curr_from = _clean_code("AIRPORT1")
     curr_to = _clean_code("AIRPORT2")                            # NEW
-    prev_cont = _stpo_continues().shift(1).over("__key").fill_null(False)
+    
 
     new_conn = (
         prev_date.is_null()                                     # First row in group
-        | ((fdate - prev_date).dt.total_days() > MAX_GAP_DAYS)  # Date gap > 1 days
+        | ((fdate - prev_date).dt.total_days() > MAX_GAP_DAYS)  # Date gap > 1 day
         | (prev_to != curr_from)                                # Airports don't chain
-        | (curr_to == prev_from)                                # NEW: return/reverse leg (A->B then B->A)
-        | ~prev_cont                                            # Previous leg was the last leg
+        | (curr_to == prev_from)                                # Return leg (A->B then B->A)
     ).fill_null(True)
-
+   
     df = df.with_columns(new_conn.cum_sum().cast(pl.Int64).alias("__conn"))
     return df.with_columns(
         (pl.int_range(pl.len()).over("__conn") + 1).cast(pl.Int64).alias("LEGNO")
@@ -146,41 +139,25 @@ def _label_by_time(df: pl.DataFrame) -> pl.DataFrame:
 # Path B: groups with missing FLIGHTTIME -> order by airport chaining
 # --------------------------------------------------------------------------- #
 def _can_follow(p: Leg, c: Leg) -> bool:
-    """May leg `c` directly follow leg `p` in the same journey?"""
-    if not p.cont:                                   # previous leg was a last leg
+    if p.a2 is None or c.a1 is None or p.a2 != c.a1:
         return False
-    if p.a2 is None or c.a1 is None or p.a2 != c.a1:  # route must chain
+    if p.a1 is not None and c.a2 == p.a1:
         return False
-    if p.a1 is not None and c.a2 == p.a1:             # NEW: reverse leg starts a new journey
+    if p.fd is None or c.fd is None:
         return False
-    if p.fd is None or c.fd is None:                 # unknown date -> don't join (as before)
-        return False
-    gap = (c.fd - p.fd).days
-    if gap < 0 or gap > MAX_GAP_DAYS:
-        return False
-    if gap == 0 and p.ft is not None and c.ft is not None and p.ft.time() > c.ft.time():
-        return False
-    if p.ft is not None and c.ft is not None and p.ft > c.ft:
-        return False
-    return True
+    return 0 <= (c.fd - p.fd).days <= MAX_GAP_DAYS
 
 
 def _build_chains(legs: list) -> list:
     """Return a list of chains; each chain is a list of indexes into `legs`, in leg order."""
     n = len(legs)
-    order = sorted(
-        range(n),
-        key=lambda i: (legs[i].fd or date.max,
-                       legs[i].ft.time() if legs[i].ft else time.max,
-                       legs[i].row),
-    )
+    order = sorted(range(n), key=lambda i: (legs[i].fd or date.max, legs[i].row))
 
     # Very large groups come from junk keys: avoid O(n^2) work, chain sequentially.
     if n > MAX_CHAIN_GROUP:
         chains: list = []
         for i in order:
-            if chains and _can_follow(legs[chains[-1][-1]], legs[i]) \
-                    and legs[i].a2 not in {legs[k].a1 for k in chains[-1]}:
+            if chains and _can_follow(legs[chains[-1][-1]], legs[i]):
                 chains[-1].append(i)
             else:
                 chains.append([i])
@@ -200,10 +177,7 @@ def _build_chains(legs: list) -> list:
         unassigned.remove(head)
         while True:
             tail = legs[chain[-1]]
-            visited = {legs[k].a1 for k in chain}
-            nxt = next(
-                (j for j in unassigned
-                 if _can_follow(tail, legs[j]) and legs[j].a2 not in visited), None,)            
+            nxt = next((j for j in unassigned if _can_follow(tail, legs[j])), None)
             if nxt is None:
                 break
             chain.append(nxt)
@@ -217,10 +191,8 @@ def _label_by_chain(df: pl.DataFrame, offset: int) -> pl.DataFrame:
         pl.col("__key"),
         pl.col("__row"),
         pl.col("__fd").dt.date().alias("fd"),
-        pl.col("__ft").alias("ft"),
         _clean_code("AIRPORT1").alias("a1"),
         _clean_code("AIRPORT2").alias("a2"),
-        _stpo_continues().alias("cont"),
     ).sort(["__key", "__row"])
 
     rows, conns, legnos = [], [], []
@@ -259,26 +231,32 @@ def add_connections(df: pl.DataFrame) -> pl.DataFrame:
 
     SEP = "\x1f"
     key_pnr_pax = pl.concat_str([pl.col("PNRR"), pl.col("PAXNAME")], separator=SEP)
+    key_all = pl.concat_str(
+        [pl.col("TDNR").fill_null(""), pl.col("PNRR").fill_null(""),
+         pl.col("PAXNAME").fill_null("")],
+        separator=SEP,
+    )
 
-    # 2. Build grouping key (TDNR takes priority if valid)
+    # 2. Build grouping key (TDNR + PNRR + PAXNAME when TDNR is valid)
     df = df.with_columns(
-        pl.when(tdnr_ok).then(pl.col("TDNR"))
+        pl.when(tdnr_ok).then(key_all)
           .when(pnr_ok & pax_ok).then(key_pnr_pax)
           .when(pnr_ok).then(pl.col("PNRR"))
           .when(pax_ok).then(pl.col("PAXNAME"))
           .otherwise(pl.col("Id"))        # no usable key -> own connection
           .alias("__key"),
         _as_datetime("FLIGHTDATE").alias("__fd"),
-        _as_datetime("FLIGHTTIME").alias("__ft"),
     ).with_row_index("__row")
 
-    bad_dt = df.filter(pl.col("__ft").is_null()).height
-
-    # 3. Keys with any missing FLIGHTTIME (and more than one leg) need route chaining
+    # 3. FLIGHTTIME is unreliable, so it is never used. Keys that have two legs
+    #    on the same date (or a missing date) cannot be ordered by date alone and
+    #    are ordered by airport chaining. Keys with all-distinct dates take the
+    #    fast path.
     needs_chain = (
-        (pl.col("__ft").is_null().sum().over("__key") > 0)
-        & (pl.len().over("__key") > 1)
-    )
+        (pl.len().over("__key") > 1)
+        & (pl.col("__fd").dt.date().n_unique().over("__key") < pl.len().over("__key"))
+    ) 
+    
     df = df.with_columns(needs_chain.alias("__chain"))
     fast = df.filter(~pl.col("__chain"))
     slow = df.filter(pl.col("__chain"))
@@ -292,7 +270,7 @@ def add_connections(df: pl.DataFrame) -> pl.DataFrame:
         n_keys = slow["__key"].n_unique()
         slow = _label_by_chain(slow, offset)
         parts.append(slow)
-        print(f"\nINFO: {slow.height:,} row(s) in {n_keys:,} key(s) have a missing FLIGHTTIME "
+        print(f"\nINFO: {slow.height:,} row(s) in {n_keys:,} key(s) have repeated dates "
               f"-> ordered by airport chaining (AIRPORT2 -> next AIRPORT1)")
 
     cols = parts[0].columns
@@ -311,10 +289,8 @@ def add_connections(df: pl.DataFrame) -> pl.DataFrame:
     if null_cnt:
         print(f"\nWARNING: {null_cnt:,} row(s) have no AIRPORT2 in their connection "
               f"(LastLegAirport is NULL)")
-    if bad_dt:
-        print(f"\nNOTE: {bad_dt:,} row(s) have a NULL/unparseable FLIGHTTIME")
 
-    return df.drop(["__row", "__conn", "__key", "__fd", "__ft", "__chain"])
+    return df.drop(["__row", "__conn", "__key", "__fd", "__chain"])
 
 
 def transform_to_target(df: pl.DataFrame) -> pl.DataFrame:
