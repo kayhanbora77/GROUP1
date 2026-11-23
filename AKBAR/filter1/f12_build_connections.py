@@ -37,6 +37,11 @@ Two ways of ordering legs inside a key:
         - if both legs have FLIGHTTIME, the previous one is not later.
      The chain starts at the leg that no other leg can precede, so the order
      comes from the route itself rather than from the row order.
+
+After A or B, round trips are split: a connection whose first AIRPORT1 equals its
+last AIRPORT2 (IXZ-MAA-SIN-DEL-IXZ) is cut at the turnaround (largest date gap,
+else the middle), and the return part gets a new ConnectionID with LegNo from 1.
+LastLegAirport is computed after the split.
 """
 
 import itertools
@@ -53,6 +58,7 @@ TARGET_TABLE = "TA_STANDARD_AKBAR"
 
 MAX_GAP_DAYS = 1
 MAX_CHAIN_GROUP = 100   # larger groups (junk keys) use a cheap sequential chain
+MAX_LOOP_LEGS = 12      # round-trip splitting only looks at connections up to this size
 NEW_COLS = ["ConnectionID", "LEGNO", "LASTLEGAIRPORT"]
 
 # Standard target schema for TA_STANDARD_AKBAR
@@ -216,6 +222,78 @@ def _label_by_chain(df: pl.DataFrame, offset: int) -> pl.DataFrame:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# Round-trip splitting: a connection that ends where it began is a loop
+# --------------------------------------------------------------------------- #
+def _split_round_trips(df: pl.DataFrame) -> pl.DataFrame:
+    """Split connections whose first AIRPORT1 == last AIRPORT2 (e.g. IXZ-MAA-SIN-DEL-IXZ)
+    into outbound and return connections.
+
+    The turnaround is chosen by leg count: 3 legs -> 2 + 1; even counts -> two equal
+    halves; other odd counts -> the largest FLIGHTDATE gap (ties go to the split closest
+    to the middle, later one on a tie). The return part gets a new __conn and LEGNO
+    restarts at 1.  
+    """
+    df = df.sort(["__conn", "LEGNO"])
+    loops = (
+        df.group_by("__conn", maintain_order=True)
+          .agg(
+              pl.len().alias("n"),
+              _clean_code("AIRPORT1").first().alias("first_a1"),
+              _clean_code("AIRPORT2").last().alias("last_a2"),
+          )
+          .filter(
+              (pl.col("n") >= 3) & (pl.col("n") <= MAX_LOOP_LEGS)
+              & pl.col("first_a1").is_not_null()
+              & (pl.col("first_a1") == pl.col("last_a2"))
+          )
+    )
+    if not loops.height:
+        return df
+
+    sub = (
+        df.join(loops.select("__conn"), on="__conn", how="inner")
+          .select("__conn", "__row", "LEGNO", pl.col("__fd").dt.date().alias("fd"))
+          .sort(["__conn", "LEGNO"])
+          .select("__conn", "__row", "fd")
+    )
+
+    rows, conns, legnos = [], [], []
+    next_conn = df["__conn"].max()
+    for _, grp in itertools.groupby(sub.iter_rows(), key=lambda r: r[0]):
+        legs = list(grp)
+        n = len(legs)
+        gaps = [
+            (legs[i + 1][2] - legs[i][2]).days
+            if legs[i][2] is not None and legs[i + 1][2] is not None else 0
+            for i in range(n - 1)
+        ]
+        # k = index of the first return leg               
+        if n == 3:
+            k = 2                # legs 1-2 stay together, leg 3 is the return
+        elif n % 2 == 0:
+            k = n // 2           # two equal halves
+        else:                    # odd n >= 5: turnaround by largest date gap
+            k = max(range(1, n), key=lambda k: (gaps[k - 1], -abs(2 * k - n), k))
+
+        next_conn += 1
+        for pos, leg in enumerate(legs[k:], start=1):
+            rows.append(leg[1])
+            conns.append(next_conn)
+            legnos.append(pos)
+
+    upd = pl.DataFrame(
+        {"__row": rows, "__conn_new": conns, "LEGNO_new": legnos},
+        schema={"__row": df.schema["__row"], "__conn_new": pl.Int64, "LEGNO_new": pl.Int64},
+    )
+    df = df.join(upd, on="__row", how="left")
+    print(f"\nINFO: {len(set(conns)):,} round-trip connection(s) split at the turnaround")
+    return df.with_columns(
+        pl.coalesce(["__conn_new", "__conn"]).alias("__conn"),
+        pl.coalesce(["LEGNO_new", "LEGNO"]).alias("LEGNO"),
+    ).drop(["__conn_new", "LEGNO_new"]).sort(["__conn", "LEGNO"])
+
+
 def add_connections(df: pl.DataFrame) -> pl.DataFrame:
     df = df.drop([c for c in NEW_COLS if c in df.columns])
 
@@ -276,6 +354,9 @@ def add_connections(df: pl.DataFrame) -> pl.DataFrame:
     cols = parts[0].columns
     df = pl.concat([p.select(cols) for p in parts], how="vertical")
     df = df.sort(["__conn", "LEGNO"])
+
+    # 3b. Split round trips (A->...->A) at the turnaround
+    df = _split_round_trips(df)
 
     # 4. Generate UUIDs and last-leg airport
     n_conn = df["__conn"].max() or 0
