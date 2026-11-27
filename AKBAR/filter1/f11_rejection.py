@@ -72,7 +72,7 @@ FLIGHT_PREFIX = "FLIGHTNO"
 DATE_PREFIX = "FLIGHTDATE"
 
 REJECT_SAME_AIRPORT = True  # True: reject rows where AIRPORT1 == AIRPORT2
-
+TIMESTAMP_COLS = {"DAIS", "FLIGHTDATE", "FLIGHTTIME"}
 
 # ============================================================================
 # REJECTION REASONS
@@ -472,8 +472,23 @@ def ensure_rejection_table(con, source_cols, rejection_table, clear=False):
 def ensure_target_table(con, source_cols, target_table):
     """Drop and recreate the target table fresh on every run."""
     con.execute(f'DROP TABLE IF EXISTS "{target_table}"')
-    col_defs = ", ".join(f'"{_sanitize_col(c)}" VARCHAR' for c in source_cols)
-    con.execute(f'CREATE TABLE "{target_table}" ({col_defs})')
+
+    column_defs = []
+
+    for col in source_cols:
+        col_name = _sanitize_col(col)
+
+        if col.upper() in TIMESTAMP_COLS:
+            column_defs.append(f'"{col_name}" TIMESTAMP')
+        else:
+            column_defs.append(f'"{col_name}" VARCHAR')
+
+    col_defs = ", ".join(column_defs)
+
+    con.execute(
+        f'CREATE TABLE "{target_table}" ({col_defs})'
+    )
+
     print(f"  Dropped and recreated {target_table}.")
 
 
@@ -487,12 +502,43 @@ def col_names(con, table: str) -> list[str]:
 
 
 def insert_df(con, table, cols, df):
-    """Insert a Polars frame into a DuckDB table via an explicit Arrow registration."""
+    """
+    Insert a Polars frame into a DuckDB table.
+
+    DAIS, FLIGHTDATE and FLIGHTTIME are stored as TIMESTAMP.
+    Everything else remains VARCHAR.
+    """
     col_list = ", ".join(f'"{c}"' for c in cols)
-    df = df.select([pl.col(c).cast(pl.String) for c in cols])
-    con.register("tmp_df", df.to_arrow(compat_level=pl.CompatLevel.oldest()))
+
+    # Keep all incoming values as strings
+    df = df.select([
+        pl.col(c).cast(pl.String)
+        for c in cols
+    ])
+
+    con.register(
+        "tmp_df",
+        df.to_arrow(compat_level=pl.CompatLevel.oldest())
+    )
     try:
-        con.execute(f'INSERT INTO "{table}" ({col_list}) SELECT * FROM tmp_df')
+        select_parts = []
+        for c in cols:
+            if c.upper() in TIMESTAMP_COLS:
+                select_parts.append(
+                    f'TRY_CAST("{c}" AS TIMESTAMP) AS "{c}"'
+                )
+            else:
+                select_parts.append(
+                    f'"{c}"'
+                )
+        select_sql = ", ".join(select_parts)
+        con.execute(
+            f"""
+            INSERT INTO "{table}" ({col_list})
+            SELECT {select_sql}
+            FROM tmp_df
+            """
+        )
     finally:
         con.unregister("tmp_df")
 
